@@ -20,7 +20,7 @@ PRICES = {"AAPL": 341.27, "AXP": 309.84, "GOOGL": 353.78, "KO": 90.11, "BAC": 53
 # the contract's v2 config, key for key
 CONTRACT_CFG = {
     "budget": 5000, "cash_buffer_pct": 10, "max_position_pct": 75, "max_order_usd": 4000, "min_order_usd": 5,
-    "max_loss_per_trade_usd": 50, "max_daily_loss_usd": 150, "max_trades_per_day": 3, "max_orders_per_day": 10,
+    "max_loss_per_trade_usd": 50, "commission_per_trade_usd": 1.0, "max_daily_loss_usd": 150, "max_trades_per_day": 3, "max_orders_per_day": 10,
     "min_reward_risk": 1.0, "require_stop": True,
     "no_entries_before": "09:45", "no_entries_after": "15:30", "flat_by": "15:55",
     "fractional": False, "broker": "alpaca", "paper": True, "blocked": [],
@@ -86,8 +86,10 @@ class TheReel(unittest.TestCase):
         self.assertEqual(s["bound_by"], "max loss")
         self.assertEqual(s["risk_per_share"], 5.86)
         self.assertEqual(s["cost"], 2913.44)
-        self.assertEqual(s["max_loss"], 46.88)
-        self.assertEqual(s["reward_risk"], 1.0)
+        self.assertEqual(s["max_loss"], 48.88)                       # 8 x 5.86 + $1 in + $1 out
+        self.assertEqual((s["gross_loss"], s["commissions"]), (46.88, 2.0))
+        self.assertEqual(s["reward_risk"], 1.0)                       # the price ratio the rule checks
+        self.assertEqual((s["net_at_target"], s["net_reward_risk"]), (44.88, 0.92))
         self.assertEqual(s["cash_buffer"], 500)
         self.assertEqual([(l["name"], l["shares"]) for l in s["limits"]],
                          [("max loss", 8), ("position cap", 10), ("max order", 10), ("cash", 12)])
@@ -101,9 +103,10 @@ class TheReel(unittest.TestCase):
             "symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
             "order_class": "bracket", "take_profit_limit_price": "370.04", "stop_loss_stop_price": "358.32",
             "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86,
-                     "max_loss": 46.88, "setup": "orb", "entry_time": "10:15 AM", "flat_by": "15:55"}})
+                     "max_loss": 48.88, "setup": "orb", "commission_per_trade": 1.0, "net_at_target": 44.88,
+                     "entry_time": "10:15 AM", "flat_by": "15:55"}})
         self.assertIn("bound by your $50 max loss", why)
-        self.assertIn("$46.88", why)
+        self.assertIn("8 x 5.86 + commissions = $48.88", why)
 
     def test_the_fixture_orders_file_is_what_it_writes(self):
         with open(os.path.join(FIX, "trader-risk", "orders-tsla.json")) as fh:
@@ -114,7 +117,7 @@ class TheReel(unittest.TestCase):
         o = size.bracket_order(size.size_trade(plan(), cfg(), limit=364.18, today=TODAY))
         self.assertEqual((o["type"], o["limit_price"], o["qty"]), ("limit", "364.18", "8"))
         s = size.size_trade(plan(), cfg(), limit=364.00, today=TODAY)
-        self.assertEqual((s["risk_per_share"], s["qty"], s["max_loss"]), (5.68, 8, 45.44))
+        self.assertEqual((s["risk_per_share"], s["qty"], s["max_loss"]), (5.68, 8, 47.44))
         self.assertEqual(size.bracket_order(s)["limit_price"], "364.00")
 
     def test_cli_writes_one_bracket_order(self):
@@ -124,7 +127,9 @@ class TheReel(unittest.TestCase):
                                  "--now", NOW, "--write", out])
             self.assertEqual(code, 0)
             self.assertIn("Size: 8 shares of TSLA = $2,913.44 at 364.18", text)
-            self.assertIn("8 x 5.86 = $46.88", text)
+            self.assertIn("8 x 5.86 + $2 commissions ($1 in, $1 out) = $48.88", text)
+            self.assertIn("($50 max loss - $2 commissions) / 5.86 risk a share", text)
+            self.assertIn("Net at the target: 8 x 5.86 - $2 commissions = $44.88", text)
             self.assertIn("<- binds", text)
             self.assertIn("not financial advice", text)
             with open(out) as fh:
@@ -133,7 +138,7 @@ class TheReel(unittest.TestCase):
             self.assertIs(doc["paper"], True)
             self.assertEqual(doc["created_at"], "2026-10-19T14:15:00Z")
             self.assertEqual(len(doc["orders"]), 1)
-            self.assertEqual(doc["orders"][0]["plan"]["max_loss"], 46.88)
+            self.assertEqual(doc["orders"][0]["plan"]["max_loss"], 48.88)
 
     def test_cli_json_and_limit(self):
         code, text, _ = run(["--plan", PLAN, "--config", CFG, "--portfolio", "/nonexistent", "--now", NOW,
@@ -173,7 +178,7 @@ class PlanRules(unittest.TestCase):
     def test_a_fresh_higher_price_means_a_bigger_risk(self):
         s = size.size_trade(plan(), cfg(min_reward_risk=0), price=366.475, today=TODAY)
         self.assertEqual((s["entry"], s["entry_from"], s["risk_per_share"]), (366.48, "price", 8.16))
-        self.assertEqual((s["qty"], s["max_loss"], s["reward_risk"]), (6, 48.96, 0.44))
+        self.assertEqual((s["qty"], s["max_loss"], s["reward_risk"]), (5, 42.8, 0.44))   # (50 - 2) / 8.16 = 5.9
         self.assertIsNone(s["refusal"])
         s = size.size_trade(plan(), cfg(), price=366.475, today=TODAY)
         self.assertIn("reward:risk 0.44 (target 370.04, entry 366.48, stop 358.32) is under your minimum 1",
@@ -190,7 +195,7 @@ class PlanRules(unittest.TestCase):
             base = ["--plan", PLAN, "--config", CFG, "--portfolio", os.path.join(d, "none"), "--prices", pp, "--json"]
             code, text, _ = run(base + ["--now", "2026-10-19 10:55"])
             out = json.loads(text)
-            self.assertEqual((code, out["sizing"]["qty"], out["orders"]), (1, 6, []))
+            self.assertEqual((code, out["sizing"]["qty"], out["orders"]), (1, 5, []))
             self.assertIn("above the plan's entry", out["notes"][0])
             out = json.loads(run(base + ["--now", "2026-10-19 11:30"])[1])
             self.assertEqual(out["sizing"]["qty"], 8)
@@ -223,9 +228,21 @@ class PlanRules(unittest.TestCase):
             size.size_trade(plan(), cfg(), today="2026-10-20")
         self.assertIn("make a new plan", str(e.exception))
 
+    def test_commissions_come_out_of_the_max_loss(self):
+        # $5 a share at risk: $50 buys 10 shares commission-free, $48 left after $1 in and $1 out buys 9
+        p = plan(symbol="ABC", entry=50.0, stop=45.0, target=60.0)
+        free = size.size_trade(p, cfg(commission_per_trade_usd=0), today=TODAY)
+        paid = size.size_trade(p, cfg(), today=TODAY)
+        self.assertEqual((free["qty"], free["max_loss"]), (10, 50.0))
+        self.assertEqual((paid["qty"], paid["max_loss"], paid["net_at_target"]), (9, 47.0, 88.0))
+        self.assertEqual(paid["net_reward_risk"], round(88.0 / 47.0, 2))
+        tight = size.size_trade(plan(symbol="ABC", entry=50.0, stop=1.0, target=150.0), cfg(), today=TODAY)
+        self.assertEqual(tight["qty"], 0)
+        self.assertIn("plus $2 in commissions", tight["refusal"])
+
     def test_under_the_minimum_order(self):
         cheap = plan(symbol="ABC", entry=4.0, stop=3.0, target=5.0)
-        s = size.size_trade(cheap, cfg(max_loss_per_trade_usd=1), today=TODAY)
+        s = size.size_trade(cheap, cfg(max_loss_per_trade_usd=1, commission_per_trade_usd=0), today=TODAY)
         self.assertEqual(s["qty"], 1)
         self.assertIn("under your $5 minimum order", s["refusal"])
         self.assertIsNone(size.bracket_order(s))

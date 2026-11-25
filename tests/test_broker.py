@@ -21,7 +21,7 @@ BATCH = ["AAPL", "AXP", "GOOGL", "KO", "BAC"]
 TSLA_CALL = {"symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
              "order_class": "bracket", "take_profit_limit_price": "370.04", "stop_loss_stop_price": "358.32"}
 TSLA_PLAIN = ("BUY 8 TSLA, market, good for today / stop-loss 358.32 / take-profit 370.04 / max loss about "
-              "$46.88 if the stop fills at 358.32 (it can fill worse in a fast market)")
+              "$48.88 if the stop fills at 358.32 (it can fill worse in a fast market)")
 
 
 def tsla(**over):
@@ -61,7 +61,7 @@ class ExplicitYes(unittest.TestCase):
 
     def test_a_bracket_yes(self):
         o = tsla()
-        for r in ("yes", "yes 8 TSLA", "yes 358.32", "yes max loss 46.88", "yes target 370.04"):
+        for r in ("yes", "yes 8 TSLA", "yes 358.32", "yes max loss 48.88", "yes target 370.04"):
             self.assertTrue(self.yes(r, o, ["TSLA"]), r)
         for r in ("yes 9", "yes 10 TSLA", "yes but stop at 357", "yes, stop 358.32", "yes AAPL", "sure"):
             self.assertFalse(self.yes(r, o, ["TSLA", "AAPL"]), r)
@@ -174,9 +174,9 @@ class Flow(unittest.TestCase):
         st = self.state_doc()
         self.assertEqual([r["status"] for r in st["orders"]], ["approved", "placed", "filled"])
         appr, plc = st["orders"][0], st["orders"][1]
-        self.assertEqual((appr["reply"], appr["kind"], appr["max_loss"], appr["date"]), ("yes", "entry", 46.88, TODAY))
+        self.assertEqual((appr["reply"], appr["kind"], appr["max_loss"], appr["date"]), ("yes", "entry", 48.88, TODAY))
         self.assertEqual(appr["at"], "2026-10-19T10:15:00-04:00")
-        self.assertEqual((plc["broker_order_id"], plc["max_loss"], plc["kind"]), ("abc123", 46.88, "entry"))
+        self.assertEqual((plc["broker_order_id"], plc["max_loss"], plc["kind"]), ("abc123", 48.88, "entry"))
         with open(self.pf) as fh:
             pf = json.load(fh)
         self.assertEqual(pf["cash"], 2086.4)
@@ -186,12 +186,12 @@ class Flow(unittest.TestCase):
         self.assertIn("DONE: placed", text)
         code, text, _ = run(["log", "--state", self.state, "--now", NOW])
         self.assertIn("1 placed today", text)
-        self.assertIn("max loss $46.88", text)
+        self.assertIn("max loss $48.88", text)
 
-        # trader-risk now counts it: a second TSLA buy today is a duplicate, and $46.88 is used
+        # trader-risk now counts it: a second TSLA buy today is a duplicate, and $48.88 is used
         res = check.check([tsla()], {"budget": 5000}, state=st, now=check.parse_now("2026-10-19 10:30"))
         self.assertIn("already placed today", " ".join(res["results"][0]["reasons"]))
-        self.assertEqual((res["today"]["entries_placed"], res["today"]["loss_at_risk"]), (1, 46.88))
+        self.assertEqual((res["today"]["entries_placed"], res["today"]["loss_at_risk"]), (1, 48.88))
 
     def test_flatten_by_the_close(self):
         self.run_risk()

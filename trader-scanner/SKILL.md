@@ -7,7 +7,12 @@ description: >-
   runs a pre-market scan of daily closes (20-day closing-high breakout, bull
   flag, reclaimed the 20-day average, oversold, oversold bounce) and an
   intraday opening-range breakout scan on 5-minute bars, then writes
-  trader/watchlist.json for trader-news and trader-entry. Free Yahoo data,
+  trader/watchlist.json for trader-news and trader-entry. The intraday
+  analyzer cross-checks both Yahoo hosts, rejects stale, incomplete or
+  conflicting bars, shows the data's age, computes VWAP, relative volume,
+  ATR, RSI and MACD, finds opening-range breakouts, momentum continuation,
+  VWAP reclaims and pullbacks (confirmed or developing), ranks them, and
+  prints the plan net of $1 a transaction. Analysis only. Free Yahoo data,
   bar by bar. Use when the user says "scan the market", "find me setups",
   "what is breaking out", "opening range breakouts", "scan for bull flags",
   "oversold stocks", "pre-market scan", "build my watchlist", "what should I
@@ -33,6 +38,8 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols TSLA,NVDA,AMD  # or --watc
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                            # after 9:50 AM ET -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:15                 # cut the clock at 10:15 AM ET
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/intraday.py" --symbols NVDA,AMD,TSLA     # data-checked setups, analysis only
+python3 "${CLAUDE_SKILL_DIR}/intraday.py" --watchlist trader/watchlist.json --catalysts news.json
 ```
 
 Flags: `--min-price 5` and `--min-volume` (daily 1,000,000, orb 0),
@@ -99,6 +106,66 @@ A closing-high breakout fires more often than an intraday-high one (KO on
 Oct 16 broke its 20-day closing high, not its 20-day intraday high). Hits are
 listed most traded first (price times volume).
 
+## The intraday analyzer (during the session, analysis only)
+
+`intraday.py` is for a short list (the ORB hits, the daily watchlist, the
+names you trade): it fetches a month of 5-minute bars for every symbol from
+BOTH query1 and query2, plus today's bars from both (four requests a symbol;
+20 symbols take about a minute).
+
+Data checks. Any failure is `NO TRADE  data: <reason>` for that symbol:
+
+- **Cross-check.** Every regular-session bar must agree on both hosts: open,
+  high, low and close within max(1 cent, 0.05 %), volume within 5 % (the
+  newest 3 bars of today are skipped for volume). A bar one host lacks is a
+  conflict. Live, a conflict is re-fetched once; still conflicting, rejected.
+  Today's bars are also fetched with `range=1d` from both hosts and must
+  match: Yahoo caches per URL, and on Nov 25 2026 query2 served WMT a
+  different 9:30 bar for `range=1mo` than for `range=1d`. Four requests a
+  symbol.
+  This is not theoretical: at 12:29 PM ET on Nov 25 2026 the two hosts
+  served different 9:30 bars for NVDA (high 145.00 vs 143.62) and META, and
+  a minute later both served the 145.00 version. Which one was right is not
+  knowable from Yahoo alone, so neither is used while they disagree.
+- **Candles.** High under the open or close, low over them, a price at or
+  under zero, negative volume, a bar with some prices missing, two different
+  bars at one time.
+- **Complete.** Every bar from 9:30 to the cutoff today.
+- **Opening range memory.** The range high and low are kept per day in
+  `trader/state/or_history.json`; a later scan that sees a different range is
+  rejected (settled bars must not change).
+- **Timestamps.** 5m bars, the right symbol, New York's UTC offset, a last
+  trade not in the future, live at most `--max-age` (300) seconds old, the
+  two hosts within 120 s of each other.
+- **Feed problem.** More than half the symbols rejected: nothing is confirmed.
+
+Latency: each symbol shows its last trade time and its age at fetch, and the
+header the median and the worst. That age is a lower bound on the delay.
+
+Indicators (None when there is not enough data): session VWAP, RVOL (volume
+through the last bar over the average through the same bar on at least 5
+full prior sessions), ATR 14 on 5-minute and on daily bars, RSI 14, MACD
+12/26/9, EMA 9 and 20.
+
+Setups, each CONFIRMED or DEVELOPING (rules in the script's header):
+opening-range breakout, momentum continuation, VWAP reclaim, pullback in an
+uptrend. Confirmed also needs every indicator present, a stop at least a
+quarter ATR away, at least one share inside the max loss after commissions,
+net reward:risk at or over `min_reward_risk`, and the time inside the entry
+window. Anything short of that is DEVELOPING with the reason listed.
+
+Costs: `commission_per_trade_usd` (default $1.00) on the buy and on the sell.
+Each signal prints shares, net at the stop, net at the target (2R), net
+reward:risk and the breakeven price. Planned numbers: a stop can fill worse
+and the spread is not in the bars.
+
+Ranking, 0 to 100: momentum 30, liquidity 25 (dollars traded, RVOL),
+catalysts 20 (`--catalysts`, trader-news `--json` output; without news a gap
+of 2 % or more counts 6 and says so), net reward:risk 25. Confirmed first.
+
+Writes `trader/intraday.json`; its `hits[]` can feed `--watchlist` of
+trader-entry. Exit 0 when something is confirmed or developing.
+
 ## The opening-range breakout scan (during the session)
 
 The opening range is the first `--or-minutes` (15) of the session: the 9:30,
@@ -114,7 +181,11 @@ to CLOSE above the range high, at that bar's close time.
    the lowest low. On a strong morning most charts are candidates, so stage 2
    checks at most `--max-confirm` (200) of them, the most traded first (price
    times volume so far), and prints PARTIAL with the count it skipped.
-   `--max-confirm 0` checks them all.
+   `--max-confirm 0` checks them all. Each stage 2 chart is fetched from
+   BOTH query1 and query2 and the bars must agree (re-fetched once); a chart
+   the hosts disagree on is not used and is listed in `host_conflicts`.
+   `--single-source` turns this off. Live, the scan stops when Yahoo's newest
+   trade is older than `--max-age` (600) seconds, and prints the data's age.
 
 Timing, live on Tue Oct 20 2026 (a strong morning): 100 liquid names at
 10:01 AM took 35 seconds (5 spark requests, 70 v8 charts, 51 of 91 usable
@@ -183,7 +254,10 @@ oversold bounce).
 - Say what was scanned: how many symbols, how many charts came back, how many
   were usable, and the time of the data.
 - Say "matched a rule", never "a buy", "a winner" or "a good trade".
-- Never print a P&L, a return or a profit figure.
+- Never print a realized P&L or a return. intraday.py prints PLANNED net
+  amounts at the stop and the target; call them planned, never results.
+- NO TRADE on data is final for that scan: never work around it by reading
+  one host only.
 - A hit is stale once the price has moved on. Re-run before acting on it.
 
 ## What it never does

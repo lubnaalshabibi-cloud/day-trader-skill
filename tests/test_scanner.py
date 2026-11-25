@@ -549,24 +549,102 @@ class Cli(unittest.TestCase):
                         res.append({"symbol": y, "response": [dict(r[0], indicators={"quote": [{"close": closes}]})]})
                 return json.dumps({"spark": {"result": res, "error": None}})
             return json.dumps(bundle[path.split("/chart/")[1].split("?")[0].replace("-", ".")])
-        old_get, old_sleep, real_now = scan.yahoo_get, scan.SLEEP, scan.parse_now
+        old_get, old_host, old_sleep, real_now = scan.yahoo_get, scan.yahoo_get_host, scan.SLEEP, scan.parse_now
         scan.yahoo_get, scan.SLEEP = get, (lambda s: None)
+        scan.yahoo_get_host = lambda host, path: get(path)  # both hosts agree here
         scan.parse_now = lambda text: real_now(text or "2026-10-19 10:20")  # the machine clock, pinned
         uni = os.path.join(self.d, "u.txt")
         with open(uni, "w") as fh:
             fh.write("\n".join(sorted(bundle)) + "\n")
         try:
             code, text, _ = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
-                                 "--max-confirm", "10", "--no-write"])
+                                 "--max-confirm", "10", "--no-write", "--max-age", "100000"])
         finally:
-            scan.yahoo_get, scan.SLEEP, scan.parse_now = old_get, old_sleep, real_now
+            scan.yahoo_get, scan.yahoo_get_host, scan.SLEEP, scan.parse_now = old_get, old_host, old_sleep, real_now
         self.assertEqual(code, 0)
         self.assertIn("231 usable; 95 candidates, 10 confirmed", text)
         self.assertIn("PARTIAL: 85 more candidates were not checked", text)
         self.assertIn("5 of the 10 checked charts closed above their opening-range high by 10:15 AM", text)
-        self.assertEqual(sum(1 for c in calls if c.startswith("/v8/")), 10)
+        self.assertEqual(sum(1 for c in calls if c.startswith("/v8/")), 20)   # 10 charts, both hosts each
         self.assertEqual(sum(1 for c in calls if c.startswith("/v7/")), 12)   # 234 symbols, 20 a request
         self.assertTrue(all("range=1d&interval=5m" in c for c in calls))
+        self.assertIn("stage 2 cross-checked on query1 and query2, 0 charts rejected", text)
+
+    def _two_host_run(self, host_get, extra=()):
+        """The networked orb path over the Oct 19 bundle, with `host_get(host, path)` for stage 2."""
+        bundle = json.loads(scan._read_maybe_gz(WALL))
+
+        def get(path):
+            if path.startswith("/v7/finance/spark"):
+                res = []
+                for y in path.split("symbols=")[1].split("&")[0].split(","):
+                    r = ((bundle.get(y.replace("-", ".")) or {}).get("chart") or {}).get("result")
+                    if r:
+                        res.append({"symbol": y, "response": [r[0]]})
+                return json.dumps({"spark": {"result": res, "error": None}})
+            return json.dumps(bundle[path.split("/chart/")[1].split("?")[0].replace("-", ".")])
+        old = scan.yahoo_get, scan.yahoo_get_host, scan.SLEEP, scan.parse_now
+        real_now = scan.parse_now
+        scan.yahoo_get, scan.SLEEP = get, (lambda s: None)
+        scan.yahoo_get_host = lambda host, path: host_get(host, path, get)
+        scan.parse_now = lambda text: real_now(text or "2026-10-19 10:20")
+        try:
+            return run(["orb", "--symbols", "TSLA,AMC", "--now", "2026-10-19 10:15", "--min-price", "0",
+                        "--no-write", "--json"] + list(extra))
+        finally:
+            scan.yahoo_get, scan.yahoo_get_host, scan.SLEEP, scan.parse_now = old
+
+    def test_hosts_that_disagree_are_rejected(self):
+        def host_get(host, path, get):
+            text = get(path)
+            if host == "query1" and "/TSLA" in path:   # query1 serves a different 9:30 high for TSLA
+                doc = json.loads(text)
+                q = doc["chart"]["result"][0]["indicators"]["quote"][0]
+                ts = doc["chart"]["result"][0]["timestamp"]
+                k = ts.index(next(t for t in ts if scan.ts_to_eastern(t).strftime("%H:%M") == "09:30"))
+                q["high"][k] += 1.38
+                text = json.dumps(doc)
+            return text
+        code, out, _ = self._two_host_run(host_get, ["--max-age", "100000"])
+        doc = json.loads(out)
+        self.assertEqual(doc["host_conflicts"], ["TSLA"])
+        self.assertNotIn("TSLA", [h["symbol"] for h in doc["hits"]])
+        self.assertTrue(doc["cross_checked"])
+
+    def test_hosts_that_agree_on_the_refetch_are_used(self):
+        seen = {"n": 0}
+
+        def host_get(host, path, get):
+            text = get(path)
+            if host == "query1" and "/TSLA" in path and seen["n"] == 0:  # wrong once, then right
+                seen["n"] += 1
+                doc = json.loads(text)
+                doc["chart"]["result"][0]["indicators"]["quote"][0]["close"][-1] += 5
+                ts = doc["chart"]["result"][0]["timestamp"]
+                doc["chart"]["result"][0]["indicators"]["quote"][0]["close"][ts.index(ts[0])] += 5
+                text = json.dumps(doc)
+            return text
+        code, out, _ = self._two_host_run(host_get, ["--max-age", "100000"])
+        doc = json.loads(out)
+        self.assertEqual(doc["host_conflicts"], [])
+        self.assertIn("TSLA", [h["symbol"] for h in doc["hits"]])
+
+    def test_a_stale_feed_is_no_scan(self):
+        # the bundle's newest trade is 10:58:07 AM; at 11:30 that is 1,913 s old (limit 600 s)
+        code, out, err = self._two_host_run(lambda host, path, get: get(path), ["--now", "2026-10-19 11:30"])
+        self.assertEqual(code, 1)
+        self.assertIn("newest trade across 2 charts is 1913 s old", err)
+
+    def test_cross_check_tolerance(self):
+        day = D(2026, 10, 19)
+        a = bars_series("2026-10-19", [100.0, 100.5, 101.0], highs=[100.2, 100.7, 101.2], lows=[99.8, 100.3, 100.8])
+        b = json.loads(json.dumps(a))
+        cut = DT(2026, 10, 19, 9, 45)
+        self.assertIsNone(scan.cross_check(a, b, day, cut))
+        b["h"][1] += 0.04                      # 4 cents on 100: within 5 bps
+        self.assertIsNone(scan.cross_check(a, b, day, cut))
+        b["h"][1] += 0.10                      # 14 cents: out
+        self.assertIn("09:35 high", scan.cross_check(a, b, day, cut))
 
     def test_plain_messages_and_exit_codes(self):
         code, _, err = run(["orb", "--offline", WALL, "--now", "2026-10-17 10:15", "--out", self.wl])

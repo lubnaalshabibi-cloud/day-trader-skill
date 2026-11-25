@@ -107,9 +107,9 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    target, 15 the stop, 5 neither. Its verdict: close to a coin flip. That is
    the point of looking before you risk a dollar.
 6. **`/trader-budget`** with a $5,000 account and a $50 max loss per trade:
-   50 / 5.86 = 8 shares ($2,913.44). If the stop fills at 358.32, the loss is
-   $46.88. It writes one bracket order: buy 8 TSLA, stop-loss 358.32,
-   take-profit 370.04.
+   ($50 - $2 commissions) / 5.86 = 8 shares ($2,913.44). If the stop fills at
+   358.32, the loss is 8 x 5.86 + $1 in + $1 out = $48.88. It writes one
+   bracket order: buy 8 TSLA, stop-loss 358.32, take-profit 370.04.
 7. **`/trader-risk`** checks it against your limits: the max loss, the daily
    loss limit, trades per day, reward to risk, the entry window, position
    size and cash. PASS or BLOCK, with the reason.
@@ -129,6 +129,7 @@ polite about it.
 python3 trader-scanner/scan.py universe                                # ~5,900 US stocks, Nasdaq Trader
 python3 trader-scanner/scan.py daily                                   # pre-market setups, whole universe
 python3 trader-scanner/scan.py orb --at 10:15                          # opening-range breakouts so far
+python3 trader-scanner/intraday.py --symbols NVDA,AMD,TSLA             # both Yahoo hosts cross-checked: VWAP, RVOL, ATR, RSI, MACD, setups, NO TRADE on bad data
 python3 trader-news/news.py --tickers TSLA --hours 12                  # headlines, 8-Ks, today's move
 python3 trader-entry/entry.py check TSLA --setup orb                   # waiting / triggered / expired
 python3 trader-entry/entry.py watch TSLA --every 30                    # bar by bar until it triggers
@@ -199,7 +200,7 @@ wash sales likely. Nothing here is tax advice.
 ## Files
 
 ```
-trader-scanner/     SKILL.md, scan.py
+trader-scanner/     SKILL.md, scan.py, intraday.py
 trader-news/        SKILL.md, news.py
 trader-entry/       SKILL.md, entry.py
 trader-exit/        SKILL.md, exit.py

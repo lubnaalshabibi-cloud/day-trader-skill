@@ -54,7 +54,10 @@ If `trader/config.json` does not exist, copy `config.example.json` into
 
 - **budget**: how much money this is for. Only money they can afford to lose.
 - **cash_buffer_pct**: how much always stays in cash (default 10).
-- **max_loss_per_trade_usd**: the most one trade may lose if the stop fills at the stop (default 50).
+- **max_loss_per_trade_usd**: the most one trade may lose if the stop fills at the stop, commissions
+  included (default 50).
+- **commission_per_trade_usd**: what the broker charges per transaction (default 1.00). A round trip
+  is two transactions, so $2.00 comes off the max loss before the shares are counted.
 - **max_position_pct**, **max_order_usd**, **min_order_usd**: the biggest position (75% of the
   budget), the biggest order ($4,000) and the smallest order ($5).
 - The day limits trader-risk enforces: **max_daily_loss_usd** (150), **max_trades_per_day** (3),
@@ -74,7 +77,7 @@ the smallest of four limits:
 
 | limit | shares |
 | --- | --- |
-| max loss | `max_loss_per_trade_usd` / risk a share (entry minus stop) |
+| max loss | (`max_loss_per_trade_usd` minus 2 x `commission_per_trade_usd`) / risk a share (entry minus stop) |
 | position cap | budget x `max_position_pct` / entry |
 | max order | `max_order_usd` / entry |
 | cash | (budget minus the cash buffer) / entry, never more than the cash in `trader/portfolio.json` |
@@ -93,7 +96,10 @@ the reason to the user in one line.
 ## Step 3: show the user
 
 Show the four limits, which one decided the size, the shares, the dollars
-and the max loss at the stop. Say plainly that a stop is an order, not a
+and the max loss at the stop (shares x risk plus both commissions), and the
+net at the target (shares x reward minus both commissions). `min_reward_risk`
+is checked on prices, the ratio trader-exit plans; the net reward:risk after
+commissions is printed next to it. Say plainly that a stop is an order, not a
 promise: in a fast market it can fill below the stop. Then hand over to
 `/trader-risk`.
 
@@ -105,25 +111,28 @@ share. The example config: $5,000 budget, 10% cash buffer, $50 max loss.
 
 | limit | the math | shares |
 | --- | --- | --- |
-| max loss | $50 / 5.86 | **8 (decides it)** |
+| max loss | ($50 - $2 commissions) / 5.86 | **8 (decides it)** |
 | position cap | 75% of $5,000 = $3,750 / 364.18 | 10 |
 | max order | $4,000 / 364.18 | 10 |
 | cash | $5,000 minus $500 = $4,500 / 364.18 | 12 |
 
-8 shares = $2,913.44. Max loss at the stop: 8 x 5.86 = $46.88. It writes:
+8 shares = $2,913.44. Max loss at the stop: 8 x 5.86 + $2 commissions ($1 in,
+$1 out) = $48.88. Net at the 1R target: 8 x 5.86 - $2 = $44.88, so the net
+reward:risk is 0.92 (1.00 on prices). It writes:
 
 ```json
 {"symbol": "TSLA", "side": "buy", "qty": "8", "type": "market", "time_in_force": "day",
  "order_class": "bracket", "take_profit_limit_price": "370.04", "stop_loss_stop_price": "358.32",
- "why": "opening-range breakout on TSLA: 8 shares, bound by your $50 max loss per trade (8 x 5.86 = $46.88 at the stop)",
- "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86, "max_loss": 46.88,
-          "setup": "orb", "entry_time": "10:15 AM", "flat_by": "15:55"}}
+ "why": "opening-range breakout on TSLA: 8 shares, bound by your $50 max loss per trade (8 x 5.86 + commissions = $48.88 at the stop)",
+ "plan": {"entry": 364.18, "stop": 358.32, "target": 370.04, "risk_per_share": 5.86, "max_loss": 48.88,
+          "setup": "orb", "commission_per_trade": 1.0, "net_at_target": 44.88, "entry_time": "10:15 AM",
+          "flat_by": "15:55"}}
 ```
 
 `why` and `plan` are notes for trader-risk and trader-broker. They are never
 sent to Alpaca. With the stop at 300.00 instead, one share would risk 64.18,
 more than the $50 max loss: no order. At 10:52 the real quote was 366.48, so
-the same plan sizes to 6 shares at 8.16 a share, and reward:risk falls to
+the same plan sizes to 5 shares at 8.16 a share ($48 / 8.16), and reward:risk falls to
 0.44: refused, because the move it was waiting for has mostly happened.
 
 ## Weights mode (kept from v1)

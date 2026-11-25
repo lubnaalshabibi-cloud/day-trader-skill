@@ -267,6 +267,18 @@ def yahoo_get(path):
     raise ScanError("Yahoo answered %s for %s" % (last, path.split("?")[0]))
 
 
+def yahoo_get_host(host, path):
+    """GET from one named host ("query1" or "query2"), no fallback: the cross-check needs both."""
+    base = {"query2": YAHOO_HOSTS[0], "query1": YAHOO_HOSTS[1]}[host]
+    try:
+        return http_get(base + path)
+    except urllib.error.HTTPError as e:
+        e.close()
+        raise ScanError("%s answered HTTP %d for %s" % (host, e.code, path.split("?")[0]))
+    except (urllib.error.URLError, OSError) as e:
+        raise ScanError("could not reach %s: %s" % (host, getattr(e, "reason", e)))
+
+
 def to_yahoo(sym):
     return sym.upper().replace(".", "-")
 
@@ -644,6 +656,35 @@ def orb_hit(bars, n_range):
     return None
 
 
+XCHECK_ABS = 0.011  # cross-check tolerance: max(1 cent, 5 bps)
+XCHECK_BPS = 5.0
+
+
+def cross_check(q2, q1, day, cutoff):
+    """query2's and query1's v8 series for one chart -> None when today's completed bars agree,
+    else the first disagreement in plain words. Prices within max(1 cent, 0.05%);
+    a bar one host has and the other does not is a disagreement."""
+    a = {b["start"]: b for b in session_bars(q2, day, cutoff)}
+    b = {x["start"]: x for x in session_bars(q1, day, cutoff)}
+    for t in sorted(set(a) | set(b)):
+        if t not in a or t not in b:
+            return "bar %s only on %s" % (t.strftime("%H:%M"), "query1" if t not in a else "query2")
+        for k, word in (("h", "high"), ("l", "low"), ("c", "close")):
+            x, y = a[t][k], b[t][k]
+            if (x is None) != (y is None):
+                return "%s %s missing on one host" % (t.strftime("%H:%M"), word)
+            if x is not None and abs(x - y) > max(XCHECK_ABS, XCHECK_BPS / 1e4 * max(x, y)):
+                return "%s %s %.2f on query2 vs %.2f on query1" % (t.strftime("%H:%M"), word, x, y)
+    return None
+
+
+def newest_trade(data):
+    """Latest meta.regularMarketTime (unix s) across fetched series, or None."""
+    ts = [int((s.get("meta") or {}).get("regularMarketTime") or 0) for s in data.values()]
+    ts = [t for t in ts if t]
+    return max(ts) if ts else None
+
+
 def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
     """-> (day, cutoff naive ET) or raise ScanError with the plain message."""
     now = to_eastern(now_utc)
@@ -960,6 +1001,7 @@ def cmd_orb(a):
     day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     symbols = read_symbols(a, offline_syms)
     confirm = None
+    xfail, data_age = [], None
     if not a.offline:
         today = to_eastern(parse_now(None)).date()
         if (today - day).days > 6:
@@ -968,7 +1010,17 @@ def cmd_orb(a):
         progress(a, "Stage 1: 5-minute closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, rng, "%dm" % BAR_MIN, a.pause, a)
+        newest = newest_trade(data)
+        if newest and at is None:
+            age = int((now - (datetime.datetime(1970, 1, 1) + datetime.timedelta(seconds=newest))).total_seconds())
+            if age > a.max_age:
+                raise ScanError("Yahoo's newest trade across %d charts is %d s old (limit %d s, --max-age): the "
+                                "feed looks stale. No scan." % (len(data), age, a.max_age))
+            data_age = age
         done = []
+
+        def one(host, sym):
+            return parse_chart(yahoo_get_host(host, chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
 
         def confirm(sym):
             if a.pause:
@@ -976,7 +1028,18 @@ def cmd_orb(a):
             done.append(sym)
             if len(done) % 50 == 0:
                 progress(a, "  stage 2: %d v8 charts so far" % len(done))
-            return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
+            if a.single_source:
+                return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
+            why = None
+            for attempt in (0, 1):
+                s2, s1 = one("query2", sym), one("query1", sym)
+                why = cross_check(s2, s1, day, cutoff)
+                if why is None:
+                    return s2
+                if attempt == 0:
+                    SLEEP(2.0)
+            xfail.append(sym)
+            raise ScanError("query1 and query2 disagree (%s); not used" % why)
     hits, counts, failed2 = scan_orb(data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
                                      a.max_confirm)
     failed = dict(failed or {})
@@ -986,6 +1049,8 @@ def cmd_orb(a):
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "orb",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
            "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
+           "cross_checked": bool(confirm is not None and not a.single_source), "host_conflicts": sorted(xfail),
+           "data_age_s": data_age,
            "interval": "%dm" % BAR_MIN,
            "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
     if a.offline:
@@ -1003,6 +1068,12 @@ def cmd_orb(a):
              "{:,}".format(counts["scanned"]),
              (" (%s under the price / volume floor)" % "{:,}".format(counts["illiquid"])) if counts["illiquid"] else "",
              "{:,}".format(counts["candidates"]), "{:,}".format(counts["confirmed"])))
+    if confirm is not None:
+        print("Data: %s; Yahoo's newest trade was %s old at the scan (free, unofficial feed: a lower bound on "
+              "the delay)." % ("stage 2 single source (--single-source)" if a.single_source else
+                               "stage 2 cross-checked on query1 and query2, %d chart%s rejected for disagreeing"
+                               % (len(xfail), "" if len(xfail) == 1 else "s"),
+                               "n/a" if data_age is None else "%d s" % data_age))
     if counts["unconfirmed"]:
         print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
               "checks all)." % ("{:,}".format(counts["unconfirmed"]), "{:,}".format(a.max_confirm)))
@@ -1065,6 +1136,10 @@ def main(argv=None):
     p.add_argument("--at", help="cut the clock at this New York time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 15:30)")
     p.add_argument("--config", default="trader/config.json")
+    p.add_argument("--max-age", type=int, default=600,
+                   help="live: no scan when Yahoo's newest trade is older than this many seconds (600)")
+    p.add_argument("--single-source", action="store_true",
+                   help="stage 2 from one host only (default: both hosts must agree)")
     a = ap.parse_args(argv)
     if not a.cmd:
         ap.print_help()

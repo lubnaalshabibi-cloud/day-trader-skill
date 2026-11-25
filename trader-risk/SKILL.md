@@ -69,7 +69,7 @@ batch that is fine order by order but breaks a limit together is caught.
 | position | (entries) the stock would be over `max_position_pct` of the account |
 | cash | (entries) the buy would leave less than the cash buffer, or need margin |
 | stop | (entries) no stop while `require_stop` is true (a bracket `stop_loss_stop_price`, or the order's plan stop); a stop on the wrong side of the entry |
-| loss | (entries) qty x (entry minus stop) over `max_loss_per_trade_usd` |
+| loss | (entries) qty x (entry minus stop) plus 2 x `commission_per_trade_usd` (in and out, $1.00 each by default) over `max_loss_per_trade_usd` |
 | reward:risk | (entries) (target minus entry) / (entry minus stop) under `min_reward_risk` |
 | daily loss | (entries) the max losses at the stops of today's entries, plus this one, over `max_daily_loss_usd` |
 | trades | (entries) `max_trades_per_day` entries already placed today |
@@ -125,7 +125,7 @@ fresh $5,000 paper account with the example config:
 ```
 PASS  #1 buy TSLA 8 shares, entry
           entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $46.88 (limit $50), reward:risk 1.00 (min 1)
+          max loss $48.88 incl. $2 commissions (limit $50), reward:risk 1.00 (min 1)
           today before this: 0 of 3 trades, $0 of $150 daily loss
 
 1 passed, 0 blocked at 2026-10-19 10:15 New York. Cash after the passed orders: $2,086.56 (paper account).
@@ -136,13 +136,13 @@ One more share and it is blocked:
 ```
 BLOCK #1 buy TSLA 9 shares, entry
           entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share
-          max loss $52.74 (limit $50), reward:risk 1.00 (min 1)
+          max loss $54.74 incl. $2 commissions (limit $50), reward:risk 1.00 (min 1)
           today before this: 0 of 3 trades, $0 of $150 daily loss
-        - loss: 9 shares x 5.86 risk a share = $52.74 at the stop, over your $50 max loss per trade
+        - loss: 9 shares x 5.86 risk a share + $2 commissions = $54.74 at the stop, over your $50 max loss per trade
 ```
 
 The same 8 shares checked at 10:55 with the real 10:52 quote (366.48) in
-`trader/prices.json` are blocked twice: 8 x 8.16 = $65.28 at the stop, and
+`trader/prices.json` are blocked twice: 8 x 8.16 + $2 = $67.28 at the stop, and
 reward:risk 0.44. At 9:40 they are blocked by the window (no new entries
 before 9:45). The 3:55 PM sell that closes the position passes, even though
 it is after the 3:30 entry cutoff: it is an exit.

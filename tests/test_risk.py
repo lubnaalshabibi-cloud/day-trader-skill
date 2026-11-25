@@ -94,7 +94,7 @@ class TheReel(unittest.TestCase):
         self.assertEqual(r["reasons"], [])
         self.assertEqual(r["warnings"], [])
         self.assertEqual((r["kind"], r["entry_ref"], r["stop"], r["target"]), ("entry", 364.18, 358.32, 370.04))
-        self.assertEqual((r["risk_per_share"], r["max_loss"], r["reward_risk"]), (5.86, 46.88, 1.0))
+        self.assertEqual((r["risk_per_share"], r["max_loss"], r["reward_risk"]), (5.86, 48.88, 1.0))
         self.assertEqual(r["value_usd"], 2913.44)
         self.assertEqual(res["cash_after"], 2086.56)
         self.assertEqual(res["date"], TODAY)
@@ -104,7 +104,7 @@ class TheReel(unittest.TestCase):
         res = check.check([tsla(qty="9")], cfg(), now=at(NOW))
         self.assertEqual(verdicts(res), ["BLOCK"])
         self.assertEqual(res["results"][0]["reasons"],
-                         ["loss: 9 shares x 5.86 risk a share = $52.74 at the stop, over your $50 max loss per trade"])
+                         ["loss: 9 shares x 5.86 risk a share + $2 commissions = $54.74 at the stop, over your $50 max loss per trade"])
 
     def test_fingerprint_is_shared_with_the_broker(self):
         o = tsla()
@@ -126,7 +126,7 @@ class TheReel(unittest.TestCase):
             self.assertEqual(code, 0)
             self.assertIn("PASS  #1 buy TSLA 8 shares, entry", text)
             self.assertIn("entry 364.18 (the plan's entry), stop 358.32, target 370.04: risk 5.86 a share", text)
-            self.assertIn("max loss $46.88 (limit $50), reward:risk 1.00 (min 1)", text)
+            self.assertIn("max loss $48.88 incl. $2 commissions (limit $50), reward:risk 1.00 (min 1)", text)
             self.assertIn("1 passed, 0 blocked at 2026-10-19 10:15 New York", text)
             self.assertIn("not financial advice", text)
             with open(out) as fh:
@@ -158,7 +158,7 @@ class DayTradeChecks(unittest.TestCase):
         res = self.one(o)
         self.assertEqual(verdicts(res), ["PASS"])
         self.assertIn("in the plan only", warnings(res))
-        self.assertEqual(res["results"][0]["max_loss"], 46.88)
+        self.assertEqual(res["results"][0]["max_loss"], 48.88)
 
     def test_stop_and_target_on_the_right_side(self):
         self.assertIn("must be below the entry 364.18", reasons(self.one(tsla(stop_loss_stop_price="365.00"))))
@@ -175,7 +175,7 @@ class DayTradeChecks(unittest.TestCase):
         res = check.check([tsla()], cfg(), prices={"TSLA": 366.475}, now=later, price_times={"TSLA": QUOTE_TIME})
         r = res["results"][0]
         self.assertEqual((r["entry_ref"], r["entry_ref_from"], r["risk_per_share"]), (366.48, "price", 8.16))
-        self.assertIn("loss: 8 shares x 8.16 risk a share = $65.28", reasons(res))
+        self.assertIn("loss: 8 shares x 8.16 risk a share + $2 commissions = $67.28", reasons(res))
 
     def test_a_stale_or_future_price_is_not_used(self):
         for now in ("2026-10-19 11:30", "2026-10-19 10:15"):
@@ -193,7 +193,7 @@ class DayTradeChecks(unittest.TestCase):
         o = tsla(type="limit", limit_price="364.00")
         res = check.check([o], cfg(), prices={"TSLA": 366.475}, now=at(NOW))
         r = res["results"][0]
-        self.assertEqual((r["entry_ref"], r["max_loss"], r["verdict"]), (364.0, 45.44, "PASS"))
+        self.assertEqual((r["entry_ref"], r["max_loss"], r["verdict"]), (364.0, 47.44, "PASS"))
 
     def test_daily_loss_and_trades_per_day(self):
         two = {"orders": [placed("AAPL"), placed("AMD")]}
@@ -204,7 +204,7 @@ class DayTradeChecks(unittest.TestCase):
         res = check.check([tsla()], cfg(), state=three, now=at(NOW))
         why = reasons(res)
         self.assertIn("trades: 3 entries placed today", why)
-        self.assertIn("daily loss: $140.64 already at risk today plus $46.88 for this one = $187.52, over your $150",
+        self.assertIn("daily loss: $140.64 already at risk today plus $48.88 for this one = $189.52, over your $150",
                       why)
         yesterday = {"orders": [placed(s, day="2026-10-16") for s in ("AAPL", "AMD", "NVDA")]}
         self.assertEqual(verdicts(check.check([tsla()], cfg(), state=yesterday, now=at(NOW))), ["PASS"])
@@ -222,7 +222,7 @@ class DayTradeChecks(unittest.TestCase):
         self.assertEqual(verdicts(res), ["PASS", "PASS", "PASS", "BLOCK"])
         why = reasons(res, 3)
         self.assertIn("trades: 0 entries placed today plus 3 passed earlier", why)
-        self.assertIn("daily loss: $120 already at risk today plus $40 for this one = $160", why)
+        self.assertIn("daily loss: $126 already at risk today plus $42 for this one = $168", why)
 
     def test_entry_window_new_york_time(self):
         cases = [("2026-10-19 09:44", "no new entries before 09:45 New York (it is 09:44)"),
@@ -276,7 +276,7 @@ class DayTradeChecks(unittest.TestCase):
         self.assertIn("short: selling more TSLA than you hold", reasons(res))
         res = self.one(short, allow_short=True)
         r = res["results"][0]
-        self.assertEqual((r["verdict"], r["kind"], r["max_loss"], r["reward_risk"]), ("PASS", "entry", 46.88, 1.0))
+        self.assertEqual((r["verdict"], r["kind"], r["max_loss"], r["reward_risk"]), ("PASS", "entry", 48.88, 1.0))
         res = self.one(dict(short, stop_loss_stop_price="360.00"), allow_short=True)
         self.assertIn("must be above the entry 364.18 for a sell", reasons(res))
 
@@ -474,7 +474,7 @@ class Cli(unittest.TestCase):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 self.assertEqual(check.main(base + ["--now", "2026-10-19 10:55"]), 1)
-            self.assertIn("8 shares x 8.16 risk a share = $65.28", buf.getvalue())
+            self.assertIn("8 shares x 8.16 risk a share + $2 commissions = $67.28", buf.getvalue())
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(check.main(base + ["--now", "2026-10-19 11:30"]), 0)
 
